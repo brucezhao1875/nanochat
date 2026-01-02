@@ -29,6 +29,13 @@ case "$PROFILE" in
         DEVICE_BATCH_SIZE=4
         TOTAL_BATCH_SIZE=524288
         ;;
+    
+    5090_2x)
+        GPU_COUNT=2
+        DEVICE_BATCH_SIZE=6
+        TOTAL_BATCH_SIZE=393216
+        ;;
+
     H100_2x)
         GPU_COUNT=2
         DEVICE_BATCH_SIZE=32
