@@ -1,19 +1,55 @@
 #!/bin/bash
+set -euo pipefail
 
 # This script is the "Best ChatGPT clone that $100 can buy",
 # It is designed to run in ~4 hours on 8XH100 node at $3/GPU/hour.
 
 # 1) Example launch (simplest):
-# bash speedrun.sh
-# 2) Example launch in a screen session (because the run takes ~4 hours):
-# screen -L -Logfile speedrun.log -S speedrun bash speedrun.sh
+# PROFILE=4090_2x bash speedrun.sh
+# 2) Example launch in a tmux session (because the run takes ~4 hours):
+# bash speedrun.sh 2>&1 | tee speedrun.log
 # 3) Example launch with wandb logging, but see below for setting up wandb first:
-# WANDB_RUN=speedrun screen -L -Logfile speedrun.log -S speedrun bash speedrun.sh
+# WANDB_RUN=speedrun PROFILE=4090_2x bash speedrun.sh 2>&1 | tee speedrun.log
+
+# Optional hardware profiles (can be overridden by CLI flags later if needed)
+PROFILE="${PROFILE:-}"
+# Defaults (same as original script: 8x H100 style)
+GPU_COUNT=8
+DEVICE_BATCH_SIZE=""
+TOTAL_BATCH_SIZE=""
+case "$PROFILE" in
+    "") : ;; # no profile, keep defaults
+    4090_2x)
+        GPU_COUNT=2
+        DEVICE_BATCH_SIZE=4
+        TOTAL_BATCH_SIZE=524288  #  524288 = 16K * 32,  393216 = 16K * 24, 491520 = 16K * 30
+        ;;
+    4090_8x)
+        GPU_COUNT=8
+        DEVICE_BATCH_SIZE=4
+        TOTAL_BATCH_SIZE=524288
+        ;;
+    H100_2x)
+        GPU_COUNT=2
+        DEVICE_BATCH_SIZE=32
+        TOTAL_BATCH_SIZE=524288
+        ;;
+    H100_8x)
+        GPU_COUNT=8
+        DEVICE_BATCH_SIZE=32
+        TOTAL_BATCH_SIZE=524288
+        ;;
+    *)
+        echo "Unknown PROFILE: $PROFILE"
+        exit 1
+        ;;
+esac
 
 # Default intermediate artifacts directory is in ~/.cache/nanochat
 export OMP_NUM_THREADS=1
 export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
 mkdir -p $NANOCHAT_BASE_DIR
+TOKENIZER_DIR="$NANOCHAT_BASE_DIR/tokenizer"
 
 # -----------------------------------------------------------------------------
 # Python venv setup with uv
@@ -40,6 +76,21 @@ if [ -z "$WANDB_RUN" ]; then
 fi
 
 # -----------------------------------------------------------------------------
+# Derived CLI args from profile overrides
+DEVICE_BATCH_ARG=""
+if [ -n "$DEVICE_BATCH_SIZE" ]; then
+    DEVICE_BATCH_ARG="--device_batch_size=$DEVICE_BATCH_SIZE"
+fi
+CHAT_EVAL_ARG=""
+if [ -n "$DEVICE_BATCH_SIZE" ]; then
+    CHAT_EVAL_ARG="--batch-size=$DEVICE_BATCH_SIZE"
+fi
+TOTAL_BATCH_ARG=""
+if [ -n "$TOTAL_BATCH_SIZE" ]; then
+    TOTAL_BATCH_ARG="--total_batch_size=$TOTAL_BATCH_SIZE"
+fi
+
+# -----------------------------------------------------------------------------
 # During the course of the run, we will be writing markdown reports to the report/
 # directory in the base dir. This command clears it out and writes a header section
 # with a bunch of system info and a timestamp that marks the start of the run.
@@ -48,12 +99,25 @@ python -m nanochat.report reset
 # -----------------------------------------------------------------------------
 # Tokenizer
 
-# Install Rust / Cargo
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source "$HOME/.cargo/env"
+# Install Rust / Cargo if not already installed
+if ! command -v cargo >/dev/null 2>&1; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source "$HOME/.cargo/env"
+else
+    source "$HOME/.cargo/env"
+    echo "Rust/Cargo already installed, skipping install"
+fi
 
-# Build the rustbpe Tokenizer
-uv run maturin develop --release --manifest-path rustbpe/Cargo.toml
+# Build the rustbpe Tokenizer (skip if already importable in current venv)
+if python - <<'PY'
+import importlib.util
+exit(0 if importlib.util.find_spec("rustbpe") else 1)
+PY
+then
+    echo "rustbpe already built, skipping maturin develop"
+else
+    uv run maturin develop --release --manifest-path rustbpe/Cargo.toml
+fi
 
 # Download the first ~2B characters of pretraining dataset
 # look at dev/repackage_data_reference.py for details on how this data was prepared
@@ -65,10 +129,14 @@ python -m nanochat.dataset -n 8
 # See comment below for why 240 is the right number here
 python -m nanochat.dataset -n 240 &
 DATASET_DOWNLOAD_PID=$!
-# train the tokenizer with vocab size 2**16 = 65536 on ~2B characters of data
-python -m scripts.tok_train --max_chars=2000000000
-# evaluate the tokenizer (report compression ratio etc.)
-python -m scripts.tok_eval
+if [ -f "$TOKENIZER_DIR/tokenizer.json" ] && [ -f "$TOKENIZER_DIR/token_bytes.pt" ]; then
+    echo "Tokenizer found at $TOKENIZER_DIR, skipping tokenizer training/eval"
+else
+    # train the tokenizer with vocab size 2**16 = 65536 on ~2B characters of data
+    python -m scripts.tok_train --max_chars=2000000000
+    # evaluate the tokenizer (report compression ratio etc.)
+    python -m scripts.tok_eval
+fi
 
 # -----------------------------------------------------------------------------
 # Base model (pretraining)
@@ -83,12 +151,12 @@ echo "Waiting for dataset download to complete..."
 wait $DATASET_DOWNLOAD_PID
 
 # Number of processes/GPUs to use
-NPROC_PER_NODE=8
+NPROC_PER_NODE=$GPU_COUNT
 
 # pretrain the d20 model
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=20 --run=$WANDB_RUN
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=20 --run=$WANDB_RUN $DEVICE_BATCH_ARG $TOTAL_BATCH_ARG
 # evaluate the model on a larger chunk of train/val data and draw some samples
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_loss
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_loss $DEVICE_BATCH_ARG $TOTAL_BATCH_ARG
 # evaluate the model on CORE tasks
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_eval
 
@@ -100,15 +168,15 @@ torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_eval
 curl -L -o $NANOCHAT_BASE_DIR/identity_conversations.jsonl https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
 
 # run midtraining and eval the model
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.mid_train -- --run=$WANDB_RUN
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i mid
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.mid_train -- --run=$WANDB_RUN $DEVICE_BATCH_ARG $TOTAL_BATCH_ARG
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i mid $CHAT_EVAL_ARG
 
 # -----------------------------------------------------------------------------
 # Supervised Finetuning (domain adaptation to each sequence all by itself per row)
 
 # train sft and re-eval right away (should see a small bump)
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft -- --run=$WANDB_RUN
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i sft
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft -- --run=$WANDB_RUN $DEVICE_BATCH_ARG
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i sft $CHAT_EVAL_ARG
 
 # chat with the model over CLI! Leave out the -p to chat interactively
 # python -m scripts.chat_cli -p "Why is the sky blue?"

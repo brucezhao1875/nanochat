@@ -45,11 +45,14 @@ matrix_lr = 0.02
 init_lr_frac = 1.0 # initial learning rate is this fraction of the base learning rate
 weight_decay = 0.0
 eval_every = 150 # -1 = disable
-eval_tokens = 20*524288
+eval_tokens = None # number of tokens to evaluate val loss on (default: 20 * total_batch_size)
 total_batch_size = 524288
 dry_run = 0 # dry_run=1 is for experiments: we will log to wandb but we won't write checkpoints or report
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from command line or config file
+# Derive eval_tokens if not explicitly provided
+if eval_tokens is None:
+    eval_tokens = 20 * total_batch_size
 user_config = {k: globals()[k] for k in config_keys} # possibly useful for logging
 # -----------------------------------------------------------------------------
 
