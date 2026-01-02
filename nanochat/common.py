@@ -170,7 +170,11 @@ def compute_init(device_type="cuda"): # cuda|cpu|mps
 
     # Precision
     if device_type == "cuda":
-        torch.backends.cuda.matmul.fp32_precision = "tf32" # uses tf32 instead of fp32 for matmuls
+        matmul = torch.backends.cuda.matmul
+        if hasattr(matmul, "allow_tf32"):
+            matmul.allow_tf32 = True  # modern API
+        elif hasattr(matmul, "fp32_precision"):
+            matmul.fp32_precision = "tf32" # legacy API
 
     # Distributed setup: Distributed Data Parallel (DDP), optional, and requires CUDA
     is_ddp_requested, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
