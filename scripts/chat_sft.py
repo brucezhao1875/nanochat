@@ -5,8 +5,8 @@ Run on one GPU e.g. for debugging:
 python -m scripts.chat_sft
 
 Or torchrun for training:
-
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft
+如下是5090*8的例子(batch_size设置为2,看看是否oom:H100上的设置是4).
+torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- --run=speedrun  --sft_device_batch_size=2 
 """
 
 import os
@@ -40,11 +40,11 @@ step = None # step to load the model from (base model or midtrained model)
 # compute/precision
 device_type = "" # cuda|cpu|mps (empty => autodetect)
 dtype = "bfloat16"
-device_batch_size = 4 # max to avoid OOM
+sft_device_batch_size = 4 # max to avoid OOM
 # optimization
 num_epochs = 1
 num_iterations = -1 # override number of iterations (-1 = disable, use num_epochs to derive it)
-target_examples_per_step = 32
+target_examples_per_step = None # default to sft_device_batch_size * 8 if not set
 unembedding_lr = 0.004
 embedding_lr = 0.2
 matrix_lr = 0.02
@@ -127,10 +127,12 @@ def sft_data_generator(dataset, batch_size):
                 yield collate_and_yield(batch)
                 batch = []
 
-examples_per_step = device_batch_size * ddp_world_size
+examples_per_step = sft_device_batch_size * ddp_world_size
+print0(f"SFT batch size: {sft_device_batch_size}")
+print0(f"Examples per step is sft_device_batch_size * ddp_world_size: {examples_per_step}")
+if target_examples_per_step is None:
+    target_examples_per_step = sft_device_batch_size * 8 # default to 8-GPU equivalent total examples
 print0(f"Target examples per step: {target_examples_per_step}")
-print0(f"Device batch size: {device_batch_size}")
-print0(f"Examples per step is device_batch_size * ddp_world_size: {examples_per_step}")
 assert target_examples_per_step % examples_per_step == 0, "Target examples per step must be divisible by examples per step"
 grad_accum_steps = target_examples_per_step // examples_per_step
 print0(f"=> Setting grad accum steps: {grad_accum_steps}")
@@ -139,8 +141,8 @@ if num_iterations == -1:
     # derive num_iterations from num_epochs and the size of the dataset
     assert num_epochs > 0, "num_epochs must be positive if num_iterations is -1"
     num_iterations = (len(train_ds) // target_examples_per_step) * num_epochs
-train_loader = sft_data_generator(train_ds, batch_size=device_batch_size)
-build_val_loader = lambda: sft_data_generator(val_ds, batch_size=device_batch_size)
+train_loader = sft_data_generator(train_ds, batch_size=sft_device_batch_size)
+build_val_loader = lambda: sft_data_generator(val_ds, batch_size=sft_device_batch_size)
 
 # -----------------------------------------------------------------------------
 # Initialize the Optimizer
@@ -197,8 +199,8 @@ for step in range(num_iterations):
         metrics = {}
         with torch.no_grad(), autocast_ctx:
             # note that because these are inside no_grad, we can usually afford to at least ~2X the batch size
-            metrics["mmlu_acc"] = run_chat_eval("MMLU", model, tokenizer, engine, batch_size=device_batch_size*2, max_problems=eval_metrics_max_problems)
-            metrics["arc_easy_acc"] = run_chat_eval("ARC-Easy", model, tokenizer, engine, batch_size=device_batch_size*2, max_problems=eval_metrics_max_problems)
+            metrics["mmlu_acc"] = run_chat_eval("MMLU", model, tokenizer, engine, batch_size=sft_device_batch_size*2, max_problems=eval_metrics_max_problems)
+            metrics["arc_easy_acc"] = run_chat_eval("ARC-Easy", model, tokenizer, engine, batch_size=sft_device_batch_size*2, max_problems=eval_metrics_max_problems)
         metrics_str = ', '.join(f'{k}: {v:.6f}' for k, v in metrics.items())
         print0(f"Step {step:05d} | {metrics_str}")
         wandb_run.log({

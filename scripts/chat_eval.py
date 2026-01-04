@@ -6,6 +6,9 @@ code lives in nanochat directory and is imported from here.
 Example runs:
 python -m scripts.chat_eval -a ARC-Easy
 torchrun --nproc_per_node=8 -m scripts.chat_eval -- -a ARC-Easy
+
+如下是在5090*8上的评估例子(batch_size设置为6).
+torchrun --standalone --nproc_per_node=8 -m scripts.chat_eval -- -i sft --batch-size=6
 """
 
 import argparse

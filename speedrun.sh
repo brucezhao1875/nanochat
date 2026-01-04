@@ -16,34 +16,46 @@ PROFILE="${PROFILE:-}"
 # Defaults (same as original script: 8x H100 style)
 GPU_COUNT=8
 DEVICE_BATCH_SIZE=""
+SFT_DEVICE_BATCH_SIZE=""
 TOTAL_BATCH_SIZE=""
 case "$PROFILE" in
     "") : ;; # no profile, keep defaults
     4090_2x)
         GPU_COUNT=2
         DEVICE_BATCH_SIZE=4
+        SFT_DEVICE_BATCH_SIZE=1
         TOTAL_BATCH_SIZE=524288  #  524288 = 16K * 32,  393216 = 16K * 24, 491520 = 16K * 30
         ;;
     4090_8x)
         GPU_COUNT=8
         DEVICE_BATCH_SIZE=4
+        SFT_DEVICE_BATCH_SIZE=1
         TOTAL_BATCH_SIZE=524288
         ;;
     
     5090_2x)
         GPU_COUNT=2
         DEVICE_BATCH_SIZE=6
+        SFT_DEVICE_BATCH_SIZE=2
+        TOTAL_BATCH_SIZE=393216
+        ;;
+    5090_8x)
+        GPU_COUNT=8
+        DEVICE_BATCH_SIZE=6
+        SFT_DEVICE_BATCH_SIZE=2
         TOTAL_BATCH_SIZE=393216
         ;;
 
     H100_2x)
         GPU_COUNT=2
         DEVICE_BATCH_SIZE=32
+        SFT_DEVICE_BATCH_SIZE=4
         TOTAL_BATCH_SIZE=524288
         ;;
     H100_8x)
         GPU_COUNT=8
         DEVICE_BATCH_SIZE=32
+        SFT_DEVICE_BATCH_SIZE=4
         TOTAL_BATCH_SIZE=524288
         ;;
     *)
@@ -88,10 +100,16 @@ DEVICE_BATCH_ARG=""
 if [ -n "$DEVICE_BATCH_SIZE" ]; then
     DEVICE_BATCH_ARG="--device_batch_size=$DEVICE_BATCH_SIZE"
 fi
+SFT_DEVICE_BATCH_ARG=""
+if [ -n "$SFT_DEVICE_BATCH_SIZE" ]; then
+    SFT_DEVICE_BATCH_ARG="--sft_device_batch_size=$SFT_DEVICE_BATCH_SIZE"
+fi
 CHAT_EVAL_ARG=""
 if [ -n "$DEVICE_BATCH_SIZE" ]; then
     CHAT_EVAL_ARG="--batch-size=$DEVICE_BATCH_SIZE"
 fi
+
+
 TOTAL_BATCH_ARG=""
 if [ -n "$TOTAL_BATCH_SIZE" ]; then
     TOTAL_BATCH_ARG="--total_batch_size=$TOTAL_BATCH_SIZE"
@@ -182,7 +200,7 @@ torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -
 # Supervised Finetuning (domain adaptation to each sequence all by itself per row)
 
 # train sft and re-eval right away (should see a small bump)
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft -- --run=$WANDB_RUN $DEVICE_BATCH_ARG
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft -- --run=$WANDB_RUN $SFT_DEVICE_BATCH_ARG
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i sft $CHAT_EVAL_ARG
 
 # chat with the model over CLI! Leave out the -p to chat interactively
